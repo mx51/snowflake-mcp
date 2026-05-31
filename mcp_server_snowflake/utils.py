@@ -495,9 +495,12 @@ def cleanup_snowflake_service(snowflake_service):
         return
 
     try:
-        if hasattr(snowflake_service, "connection") and snowflake_service.connection:
+        # Use the private attribute so that cleanup never lazily establishes a
+        # connection (which would trigger authentication) just to close it.
+        connection = getattr(snowflake_service, "_connection", None)
+        if connection:
             logger.info("Closing Snowflake connection...")
-            snowflake_service.connection.close()
+            connection.close()
     except Exception as e:
         logger.error(f"Error closing Snowflake connection: {e}")
 

@@ -141,9 +141,44 @@ class SnowflakeService:
         self._is_spcs_container = is_running_in_spcs_container()
 
         self.unpack_service_specs()
-        # Persist connection to avoid closing it after each request
-        self.connection = self._get_persistent_connection()
-        self.root = Root(self.connection)
+
+        # Lazily-established connection. We intentionally do NOT connect here so
+        # that simply starting the server (e.g. when the MCP client boots) does
+        # not trigger authentication (such as an external browser login). The
+        # connection is created on first actual use via the `connection`/`root`
+        # properties or `get_connection`.
+        self._connection: Optional[Any] = None
+        self._root: Optional[Root] = None
+
+    @property
+    def connection(self) -> Any:
+        """
+        Lazily-established persistent Snowflake connection.
+
+        The connection (and any associated authentication, e.g. an external
+        browser login) is only created the first time it is accessed, rather
+        than at server startup.
+        """
+        if self._connection is None:
+            # Persist connection to avoid closing it after each request
+            self._connection = self._get_persistent_connection()
+        return self._connection
+
+    @connection.setter
+    def connection(self, value: Any) -> None:
+        self._connection = value
+
+    @property
+    def root(self) -> Root:
+        """
+        Lazily-established Snowflake ``Root`` object.
+
+        Accessing this triggers connection establishment (and thus
+        authentication) on first use.
+        """
+        if self._root is None:
+            self._root = Root(self.connection)
+        return self._root
 
     def unpack_service_specs(self) -> None:
         """
@@ -342,38 +377,20 @@ class SnowflakeService:
         """
 
         try:
-            if self.connection is None:
-                # Get connection parameters based on environment
-                if self._is_spcs_container:
-                    logger.info("Using SPCS container OAuth authentication")
-                    connection_params = {
-                        "host": os.getenv("SNOWFLAKE_HOST"),
-                        "account": os.getenv("SNOWFLAKE_ACCOUNT"),
-                        "token": get_spcs_container_token(),
-                        "authenticator": "oauth",
-                    }
-                    connection_params = {
-                        k: v for k, v in connection_params.items() if v is not None
-                    }
-                else:
-                    logger.info("Using external authentication")
-                    connection_params = self.connection_params.copy()
-
-                self.connection = connect(
-                    **connection_params,
-                    session_parameters=session_parameters,
-                    client_session_keep_alive=False,
-                    paramstyle="qmark",
-                )
+            # Accessing the `connection` property lazily establishes the
+            # persistent connection (and triggers authentication) on first use.
+            # If the connection already exists it is reused and
+            # ``session_parameters`` are ignored.
+            connection = self.connection
 
             cursor = (
-                self.connection.cursor(DictCursor)
+                connection.cursor(DictCursor)
                 if use_dict_cursor
-                else self.connection.cursor()
+                else connection.cursor()
             )
 
             try:
-                yield self.connection, cursor
+                yield connection, cursor
             finally:
                 cursor.close()
 
